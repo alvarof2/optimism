@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/rlp"
 )
 
 func copyDbExceptAncients(oldDbPath, newDbPath string) error {
@@ -63,41 +65,49 @@ func copyDbExceptAncients(oldDbPath, newDbPath string) error {
 	return nil
 }
 
-func migrateNonAncientsDb(newDB ethdb.Database, lastBlock, numAncients, batchSize uint64) (uint64, error) {
+func migrateNonAncientsDb(newDB ethdb.Database, lastBlock, numAncients, batchSize uint64, lastAncient *RLPBlockElement) (uint64, error) {
 	defer timer("migrateNonAncientsDb")()
 
-	// Delete bad blocks, we could migrate them, but we have no need of the historical bad blocks. AFAICS bad blocks
+	// Delete bad blocks, we could migrate them, but we have no need for the historical bad blocks. AFAICS bad blocks
 	// are stored solely so that they can be retrieved or traced via the debug API, but we are no longer interested
 	// in these old bad blocks.
 	rawdb.DeleteBadBlocks(newDB)
 
-	// The genesis block is the only block that should remain stored in the non-ancient db even after it is frozen.
 	if numAncients > 0 {
+		// The genesis block is the only block that should remain stored in the non-ancient db even after it is frozen.
 		log.Info("Migrating genesis block in non-ancient db", "process", "non-ancients")
-		if err := migrateNonAncientBlock(0, rawdb.ReadCanonicalHash(newDB, 0), newDB); err != nil {
+		genesisBlockElement, err := readRLPBlockElement(newDB, 0, rawdb.ReadCanonicalHash(newDB, 0))
+		if err != nil {
+			return 0, err
+		}
+		if err := migrateNonAncientBlock(newDB, genesisBlockElement); err != nil {
 			return 0, err
 		}
 	}
 
-	prevBlockNumber := uint64(numAncients - 1) // Will underflow if numAncients is 0
-
+	prevBlockElement := lastAncient
 	for i := numAncients; i <= lastBlock; i += batchSize {
-		numbersHash := rawdb.ReadAllHashesInRange(newDB, i, i+batchSize-1)
+		numbersHash := rawdb.ReadAllHashesInRange(newDB, i, i+batchSize-1) // TODO(Alec)
 
 		log.Info("Processing Block Range", "process", "non-ancients", "from", i, "to(inclusve)", i+batchSize-1, "count", len(numbersHash))
 		for _, numberHash := range numbersHash {
-			if numberHash.Number != prevBlockNumber+1 { // prevBlocNumber will overflow back to 0 here if numAncients is 0
-				return 0, fmt.Errorf("gap found between non-ancient blocks numbered %d and %d. Please delete the target directory and repeat the migration with an uncorrupted source directory", prevBlockNumber, numberHash.Number)
-			}
-			prevBlockNumber = numberHash.Number
 
-			if err := migrateNonAncientBlock(numberHash.Number, numberHash.Hash, newDB); err != nil {
+			blockElement, err := readRLPBlockElement(newDB, numberHash.Number, numberHash.Hash)
+			if err != nil {
+				return 0, fmt.Errorf("failed to read RLP block element for non-ancient block %d - %x: %w", numberHash.Number, numberHash.Hash, err)
+			}
+
+			if prevBlockElement != nil {
+				if err := blockElement.Follows(prevBlockElement); err != nil {
+					return 0, err
+				}
+			}
+
+			if err := migrateNonAncientBlock(newDB, blockElement); err != nil {
 				return 0, fmt.Errorf("failed to migrate non-ancient block %d - %x: %w", numberHash.Number, numberHash.Hash, err)
 			}
 
-			if err := checkOtherDataForNonAncientBlock(numberHash.Number, numberHash.Hash, newDB); err != nil {
-				return 0, fmt.Errorf("failed to ensure all non-transformed data is present for non-ancient block %d - %x: %w. Please delete the target directory and repeat the migration with an uncorrupted source directory", numberHash.Number, numberHash.Hash, err)
-			}
+			prevBlockElement = blockElement
 		}
 	}
 
@@ -105,42 +115,80 @@ func migrateNonAncientsDb(newDB ethdb.Database, lastBlock, numAncients, batchSiz
 	return migratedCount, nil
 }
 
-func migrateNonAncientBlock(number uint64, hash common.Hash, newDB ethdb.Database) error {
-	// read header and body
-	header, err := newDB.Get(headerKey(number, hash))
-	if err != nil {
-		return fmt.Errorf("failed to read header: block %d - %x: %w", number, hash, err)
-	}
-	body, err := newDB.Get(blockBodyKey(number, hash))
-	if err != nil {
-		return fmt.Errorf("failed to read body: block %d - %x: %w", number, hash, err)
-	}
-
+func migrateNonAncientBlock(newDB ethdb.Database, block *RLPBlockElement) error {
 	// transform header and body
-	newHeader, err := transformHeader(header)
+	newHeader, err := transformHeader(block.header)
 	if err != nil {
-		return fmt.Errorf("failed to transform header: block %d - %x: %w", number, hash, err)
+		return fmt.Errorf("failed to transform header: block %d - %x: %w", block.number, block.hash, err)
 	}
-	newBody, err := transformBlockBody(body)
+	newBody, err := transformBlockBody(block.body)
 	if err != nil {
-		return fmt.Errorf("failed to transform body: block %d - %x: %w", number, hash, err)
+		return fmt.Errorf("failed to transform body: block %d - %x: %w", block.number, block.hash, err)
 	}
 
-	if err := checkTransformedHeader(newHeader, hash[:], number); err != nil {
+	if err := checkTransformedHeader(newHeader, block.hash[:], block.number); err != nil {
 		return err
 	}
 
 	// write header and body
+	hash := common.BytesToHash(block.hash)
 	batch := newDB.NewBatch()
-	rawdb.WriteBodyRLP(batch, hash, number, newBody)
-	if err := batch.Put(headerKey(number, hash), newHeader); err != nil {
-		return fmt.Errorf("failed to write header: block %d - %x: %w", number, hash, err)
+	rawdb.WriteBodyRLP(batch, hash, block.number, newBody)
+	if err := batch.Put(headerKey(block.number, hash), newHeader); err != nil {
+		return fmt.Errorf("failed to write header: block %d - %x: %w", block.number, block.hash, err)
 	}
 	if err := batch.Write(); err != nil {
-		return fmt.Errorf("failed to write header and body: block %d - %x: %w", number, hash, err)
+		return fmt.Errorf("failed to write header and body: block %d - %x: %w", block.number, block.hash, err)
 	}
 
 	return nil
+}
+
+func readRLPBlockElement(newDB ethdb.Database, number uint64, hash common.Hash) (*RLPBlockElement, error) {
+	e := &RLPBlockElement{}
+	var err error
+
+	numberRLP, err := newDB.Get(headerNumberKey(hash))
+	if err != nil {
+		return nil, fmt.Errorf("failed to find number for hash in newDB leveldb block %d - %x: %w", number, hash, err)
+	}
+	e.number = binary.BigEndian.Uint64(numberRLP)
+
+	e.hash, err = newDB.Get(headerHashKey(number))
+	if err != nil {
+		return nil, fmt.Errorf("failed to find canonical hash in newDB leveldb: block %d - %x: %w", number, hash, err)
+	}
+	e.header, err = newDB.Get(headerKey(number, hash))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read header: block %d - %x: %w", number, hash, err)
+	}
+	e.body, err = newDB.Get(blockBodyKey(number, hash))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read body: block %d - %x: %w", number, hash, err)
+	}
+	e.receipts, err = newDB.Get(blockReceiptsKey(number, hash))
+	if err != nil {
+		return nil, fmt.Errorf("failed to find receipts in newDB leveldb: block %d - %x: %w", number, hash, err)
+	}
+	e.td, err = newDB.Get(headerTDKey(number, hash))
+	if err != nil {
+		return nil, fmt.Errorf("failed to find total difficulty in newDB leveldb: block %d - %x: %w", number, hash, err)
+	}
+
+	// if !bytes.Equal(hashFromDB, hash[:]) {
+	// 	return fmt.Errorf("canonical hash mismatch in newDB leveldb: block %d - %x: %w", number, hash, err)
+	// }
+
+	// if !bytes.Equal(numberFromDB, encodeBlockNumber(number)) {
+	// 	log.Error("Number for hash mismatch", "block", number, "numberFromDB", numberFromDB, "hash", hash)
+	// 	return fmt.Errorf("number for hash mismatch in newDB leveldb: block %d - %x: %w", number, hash, err)
+	// }
+
+	err = rlp.DecodeBytes(e.header, &e.decodedHeader)
+	if err != nil {
+		return nil, fmt.Errorf("can't decode header: %w", err)
+	}
+	return e, nil
 }
 
 // checkOtherDataForNonAncientBlock checks that all the data that is not transformed is successfully copied for non-ancient blocks.
@@ -164,7 +212,7 @@ func checkOtherDataForNonAncientBlock(number uint64, hash common.Hash, newDB eth
 	}
 	numberFromDB, err := newDB.Get(headerNumberKey(hash))
 	if err != nil {
-		return fmt.Errorf("failed to find number for hash in newDB leveldb: block %d - %x: %w", number, hash, err)
+		return fmt.Errorf("failed to find number for hash in newDB leveldb block %d - %x: %w", number, hash, err)
 	}
 	if !bytes.Equal(numberFromDB, encodeBlockNumber(number)) {
 		log.Error("Number for hash mismatch", "block", number, "numberFromDB", numberFromDB, "hash", hash)

@@ -21,10 +21,12 @@ import (
 
 	"github.com/urfave/cli/v2"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/rpc"
 
 	"golang.org/x/sync/errgroup"
@@ -194,7 +196,7 @@ func main() {
 				Usage: "Perform a  pre-migration of ancient blocks and copy over all other data without transforming it. This should be run a day before the full migration command is run to minimize downtime.",
 				Flags: preMigrationFlags,
 				Action: func(ctx *cli.Context) error {
-					if _, _, err := runPreMigration(parsePreMigrationOptions(ctx)); err != nil {
+					if _, _, _, err := runPreMigration(parsePreMigrationOptions(ctx)); err != nil {
 						return fmt.Errorf("failed to run pre-migration: %w", err)
 					}
 					log.Info("Finished pre migration successfully!")
@@ -230,6 +232,69 @@ func main() {
 	}
 }
 
+// RLPBlockRange is a range of blocks in RLP format
+type RLPBlockRange struct {
+	start    uint64
+	hashes   [][]byte
+	headers  [][]byte
+	bodies   [][]byte
+	receipts [][]byte
+	tds      [][]byte
+}
+
+type RLPBlockElement struct {
+	decodedHeader *types.Header
+	number        uint64
+	hash          []byte
+	header        []byte // TODO(Alec): why this?
+	body          []byte
+	receipts      []byte
+	td            []byte
+}
+
+func (r *RLPBlockRange) Element(i uint64) (*RLPBlockElement, error) {
+	header := types.Header{}
+	err := rlp.DecodeBytes(r.headers[i], &header)
+	if err != nil {
+		return nil, fmt.Errorf("can't decode header: %w", err)
+	}
+	return &RLPBlockElement{
+		decodedHeader: &header,
+		number:        r.start + i, // TODO(Alec): how to use this?
+		hash:          r.hashes[i],
+		header:        r.headers[i],
+		body:          r.bodies[i],
+		receipts:      r.receipts[i],
+		td:            r.tds[i],
+	}, nil
+}
+
+func (r *RLPBlockRange) DropFirst() {
+	r.start = r.start + 1
+	r.hashes = r.hashes[1:]
+	r.headers = r.headers[1:]
+	r.bodies = r.bodies[1:]
+	r.receipts = r.receipts[1:]
+	r.tds = r.tds[1:]
+}
+
+func (e *RLPBlockElement) Header() *types.Header {
+	return e.decodedHeader
+}
+
+func (e *RLPBlockElement) Follows(prev *RLPBlockElement) error {
+	if e.Header().Number.Uint64() != prev.Header().Number.Uint64()+1 {
+		return fmt.Errorf("header number mismatch: expected %d, actual %d", prev.Header().Number.Uint64()+1, e.Header().Number.Uint64())
+	}
+	// We compare the parent hash with the stored hash of the previous block because
+	// at this point the header object will not calculate the correct hash since it
+	// first needs to be transformed.
+	if e.Header().ParentHash != common.Hash(prev.hash) {
+		return fmt.Errorf("parent hash mismatch between blocks %d and %d", e.Header().Number.Uint64(), prev.Header().Number.Uint64())
+	}
+	return nil
+}
+
 func runFullMigration(opts fullMigrationOptions) error {
 	defer timer("full migration")()
 
@@ -247,12 +312,13 @@ func runFullMigration(opts fullMigrationOptions) error {
 
 	var numAncients uint64
 	var strayAncientBlocks []*rawdb.NumberHash
+	var lastAncient *RLPBlockElement
 
-	if strayAncientBlocks, numAncients, err = runPreMigration(opts.preMigrationOptions); err != nil {
+	if strayAncientBlocks, numAncients, lastAncient, err = runPreMigration(opts.preMigrationOptions); err != nil {
 		return fmt.Errorf("failed to run pre-migration: %w", err)
 	}
 
-	if err = runNonAncientMigration(opts.newDBPath, strayAncientBlocks, opts.batchSize, numAncients); err != nil {
+	if err = runNonAncientMigration(opts.newDBPath, strayAncientBlocks, opts.batchSize, numAncients, lastAncient); err != nil {
 		return fmt.Errorf("failed to run non-ancient migration: %w", err)
 	}
 	if err = runStateMigration(opts.newDBPath, opts.stateMigrationOptions); err != nil {
@@ -264,14 +330,14 @@ func runFullMigration(opts fullMigrationOptions) error {
 	return nil
 }
 
-func runPreMigration(opts preMigrationOptions) ([]*rawdb.NumberHash, uint64, error) {
+func runPreMigration(opts preMigrationOptions) ([]*rawdb.NumberHash, uint64, *RLPBlockElement, error) {
 	defer timer("pre-migration")()
 
 	log.Info("Pre-Migration Started", "oldDBPath", opts.oldDBPath, "newDBPath", opts.newDBPath, "batchSize", opts.batchSize, "memoryLimit", opts.memoryLimit)
 
 	// Check that `rsync` command is available. We use this to copy the db excluding ancients, which we will copy separately
 	if _, err := exec.LookPath("rsync"); err != nil {
-		return nil, 0, fmt.Errorf("please install `rsync` to run block migration")
+		return nil, 0, nil, fmt.Errorf("please install `rsync` to run block migration")
 	}
 
 	debug.SetMemoryLimit(opts.memoryLimit * 1 << 20) // Set memory limit, converting from MiB to bytes
@@ -279,21 +345,22 @@ func runPreMigration(opts preMigrationOptions) ([]*rawdb.NumberHash, uint64, err
 	var err error
 
 	if err = createNewDbPathIfNotExists(opts.newDBPath); err != nil {
-		return nil, 0, fmt.Errorf("failed to create new db path: %w", err)
+		return nil, 0, nil, fmt.Errorf("failed to create new db path: %w", err)
 	}
 
 	if opts.resetNonAncients {
 		if err = cleanupNonAncientDb(opts.newDBPath); err != nil {
-			return nil, 0, fmt.Errorf("failed to cleanup non-ancient db: %w", err)
+			return nil, 0, nil, fmt.Errorf("failed to cleanup non-ancient db: %w", err)
 		}
 	}
 
 	var numAncientsNewBefore uint64
 	var numAncientsNewAfter uint64
 	var strayAncientBlocks []*rawdb.NumberHash
+	var lastAncient *RLPBlockElement
 	g, ctx := errgroup.WithContext(context.Background())
 	g.Go(func() error {
-		if numAncientsNewBefore, numAncientsNewAfter, err = migrateAncientsDb(ctx, opts.oldDBPath, opts.newDBPath, opts.batchSize, opts.bufferSize); err != nil {
+		if numAncientsNewBefore, numAncientsNewAfter, lastAncient, err = migrateAncientsDb(ctx, opts.oldDBPath, opts.newDBPath, opts.batchSize, opts.bufferSize); err != nil {
 			return fmt.Errorf("failed to migrate ancients database: %w", err)
 		}
 		// Scanning for stray ancient blocks is slow, so we do it as soon as we can after the lock on oldDB is released by migrateAncientsDb
@@ -309,15 +376,16 @@ func runPreMigration(opts preMigrationOptions) ([]*rawdb.NumberHash, uint64, err
 	})
 
 	if err = g.Wait(); err != nil {
-		return nil, 0, fmt.Errorf("failed to migrate blocks: %w", err)
+		return nil, 0, nil, fmt.Errorf("failed to migrate blocks: %w", err)
 	}
 
 	log.Info("Pre-Migration Finished", "oldDBPath", opts.oldDBPath, "newDBPath", opts.newDBPath, "migratedAncients", numAncientsNewAfter-numAncientsNewBefore, "strayAncientBlocks", len(strayAncientBlocks))
 
-	return strayAncientBlocks, numAncientsNewAfter, nil
+	return strayAncientBlocks, numAncientsNewAfter, lastAncient, nil
 }
 
-func runNonAncientMigration(newDBPath string, strayAncientBlocks []*rawdb.NumberHash, batchSize, numAncients uint64) (err error) {
+// TODO(Alec) do we need to pass numAncients here?
+func runNonAncientMigration(newDBPath string, strayAncientBlocks []*rawdb.NumberHash, batchSize, numAncients uint64, lastAncient *RLPBlockElement) (err error) {
 	defer timer("non-ancient migration")()
 
 	newDB, err := openDBWithoutFreezer(newDBPath, false)
@@ -331,12 +399,11 @@ func runNonAncientMigration(newDBPath string, strayAncientBlocks []*rawdb.Number
 	// get the last block number
 	hash := rawdb.ReadHeadHeaderHash(newDB)
 	lastBlock := *rawdb.ReadHeaderNumber(newDB, hash)
-	lastAncient := numAncients - 1
 
-	log.Info("Non-Ancient Block Migration Started", "process", "non-ancients", "newDBPath", newDBPath, "batchSize", batchSize, "startBlock", numAncients, "endBlock", lastBlock, "count", lastBlock-lastAncient, "lastAncientBlock", lastAncient)
+	log.Info("Non-Ancient Block Migration Started", "process", "non-ancients", "newDBPath", newDBPath, "batchSize", batchSize, "startBlock", numAncients, "endBlock", lastBlock, "count", lastBlock-lastAncient.number, "lastAncientBlock", lastAncient.number)
 
 	var numNonAncients uint64
-	if numNonAncients, err = migrateNonAncientsDb(newDB, lastBlock, numAncients, batchSize); err != nil {
+	if numNonAncients, err = migrateNonAncientsDb(newDB, lastBlock, numAncients, batchSize, lastAncient); err != nil {
 		return fmt.Errorf("failed to migrate non-ancients database: %w", err)
 	}
 
