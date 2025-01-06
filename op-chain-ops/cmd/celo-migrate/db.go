@@ -92,7 +92,7 @@ func openDB(chaindataPath string, readOnly bool) (ethdb.Database, error) {
 
 // Opens a database without access to AncientsDb
 func openDBWithoutFreezer(chaindataPath string, readOnly bool) (ethdb.Database, error) {
-	if _, err := os.Stat(chaindataPath); errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(chaindataPath); err != nil {
 		return nil, err
 	}
 
