@@ -77,6 +77,7 @@ func hasSameHash(newHeader, oldHash []byte) (bool, common.Hash) {
 	return bytes.Equal(oldHash, newHash.Bytes()), newHash
 }
 
+// checkTransformedHeader checks that the transformed header has the same hash and block number as expected
 func checkTransformedHeader(header, expectedHash []byte, expectedNumber uint64) error {
 	// Check that transformed header has the same hash
 	if yes, newHash := hasSameHash(header, expectedHash); !yes {

@@ -166,24 +166,7 @@ func loadAncientRange(freezer *rawdb.Freezer, start, count uint64) (*RLPBlockRan
 		return nil, fmt.Errorf("failed to read tds from old freezer: %w", err)
 	}
 
-	// TODO(Alec): Should this be moved to CheckContinuity?
-	// Make sure the number of elements retrieved from each table matches the expected length
-	if uint64(len(blockRange.hashes)) != count {
-		err = fmt.Errorf("Expected count mismatch in block range hashes: expected %d, actual %d", count, len(blockRange.hashes))
-	}
-	if uint64(len(blockRange.bodies)) != count {
-		err = errors.Join(err, fmt.Errorf("Expected count mismatch in block range bodies: expected %d, actual %d", count, len(blockRange.bodies)))
-	}
-	if uint64(len(blockRange.headers)) != count {
-		err = errors.Join(err, fmt.Errorf("Expected count mismatch in block range headers: expected %d, actual %d", count, len(blockRange.headers)))
-	}
-	if uint64(len(blockRange.receipts)) != count {
-		err = errors.Join(err, fmt.Errorf("Expected count mismatch in block range receipts: expected %d, actual %d", count, len(blockRange.receipts)))
-	}
-	if uint64(len(blockRange.tds)) != count {
-		err = errors.Join(err, fmt.Errorf("Expected count mismatch in block range total difficulties: expected %d, actual %d", count, len(blockRange.tds)))
-	}
-	return blockRange, err
+	return blockRange, nil
 }
 
 // Get the last ancient block data so we can check for continuity between ancients and non-ancients
@@ -199,8 +182,6 @@ func transformBlocks(ctx context.Context, in <-chan RLPBlockRange, out chan<- RL
 	// Transform blocks from the in channel and send them to the out channel
 	defer close(out)
 
-	prevBlockNumber := uint64(startBlock - 1) // Will underflow when startBlock is 0, but then overflow back to 0
-
 	for blockRange := range in {
 		select {
 		case <-ctx.Done():
@@ -208,12 +189,6 @@ func transformBlocks(ctx context.Context, in <-chan RLPBlockRange, out chan<- RL
 		default:
 			for i := range blockRange.hashes {
 				blockNumber := blockRange.start + uint64(i)
-
-				if blockNumber != prevBlockNumber+1 { // Overflows back to 0 when startBlock is 0
-					return fmt.Errorf("gap found between ancient blocks numbered %d and %d. Please delete the target directory and repeat the migration with an uncorrupted source directory", prevBlockNumber, blockNumber)
-				}
-				// Block ranges are in order because they are read sequentially from the freezer
-				prevBlockNumber = blockNumber
 
 				newHeader, err := transformHeader(blockRange.headers[i])
 				if err != nil {

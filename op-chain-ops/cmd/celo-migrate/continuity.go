@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -23,7 +24,7 @@ type RLPBlockElement struct {
 	decodedHeader *types.Header
 	number        uint64
 	hash          []byte
-	header        []byte // TODO(Alec): why this?
+	header        []byte
 	body          []byte
 	receipts      []byte
 	td            []byte
@@ -55,8 +56,14 @@ func (r *RLPBlockRange) DropFirst() {
 	r.tds = r.tds[1:]
 }
 
+// CheckContinuity checks if the block data in the range is continuous
+// by comparing the header number and parent hash of each block with the previous block,
+// and by checking if the number of elements retrieved from each table is the same.
 func (r *RLPBlockRange) CheckContinuity(prevElement *RLPBlockElement) error {
-	for i := range r.hashes { // TODO(Alec): what if there are different lengths?
+	if err := r.CheckLengths(); err != nil {
+		return err
+	}
+	for i := range r.hashes {
 		currElement, err := r.Element(uint64(i))
 		if err != nil {
 			return err
@@ -71,6 +78,31 @@ func (r *RLPBlockRange) CheckContinuity(prevElement *RLPBlockElement) error {
 	return nil
 }
 
+// CheckLengths makes sure the number of elements retrieved from each table is the same
+func (r *RLPBlockRange) CheckLengths() error {
+	var err error
+	count := len(r.hashes)
+	// TODO(Alec) should this take in an expected length parameter?
+	// if len(r.hashes) != count {
+	// 	err = fmt.Errorf("Expected count mismatch in block range hashes: expected %d, actual %d", count, len(r.hashes))
+	// }
+	if len(r.bodies) != count {
+		err = errors.Join(err, fmt.Errorf("Expected count mismatch in block range bodies: expected %d, actual %d", count, len(r.bodies)))
+	}
+	if len(r.headers) != count {
+		err = errors.Join(err, fmt.Errorf("Expected count mismatch in block range headers: expected %d, actual %d", count, len(r.headers)))
+	}
+	if len(r.receipts) != count {
+		err = errors.Join(err, fmt.Errorf("Expected count mismatch in block range receipts: expected %d, actual %d", count, len(r.receipts)))
+	}
+	if len(r.tds) != count {
+		err = errors.Join(err, fmt.Errorf("Expected count mismatch in block range total difficulties: expected %d, actual %d", count, len(r.tds)))
+	}
+	return err
+}
+
+// Follows checks if the current block has a number one greater than the previous block
+// and if the parent hash of the current block matches the hash of the previous block.
 func (e *RLPBlockElement) Follows(prev *RLPBlockElement) error {
 	if e.Header().Number.Uint64() != prev.Header().Number.Uint64()+1 {
 		return fmt.Errorf("header number mismatch: expected %d, actual %d", prev.Header().Number.Uint64()+1, e.Header().Number.Uint64())
