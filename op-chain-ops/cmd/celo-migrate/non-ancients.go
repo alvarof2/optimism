@@ -87,32 +87,59 @@ func migrateNonAncientsDb(newDB ethdb.Database, lastBlock, numAncients, batchSiz
 
 	prevBlockElement := lastAncient
 	for i := numAncients; i <= lastBlock; i += batchSize {
-		numbersHash := rawdb.ReadAllHashesInRange(newDB, i, i+batchSize-1) // TODO(Alec)
+		blockRange, err := loadNonAncientRange(newDB, i, batchSize)
+		if err != nil {
+			return 0, err
+		}
 
-		log.Info("Processing Block Range", "process", "non-ancients", "from", i, "to(inclusve)", i+batchSize-1, "count", len(numbersHash))
-		for _, numberHash := range numbersHash {
+		log.Info("Processing Block Range", "process", "non-ancients", "from", i, "to(inclusve)", i+batchSize-1, "count", len(blockRange.hashes))
 
-			blockElement, err := readRLPBlockElement(newDB, numberHash.Number, numberHash.Hash)
+		if err := blockRange.CheckContinuity(prevBlockElement); err != nil {
+			return 0, fmt.Errorf("failed continuity check for non-ancient blocks: %w", err)
+		}
+
+		for i := range blockRange.hashes {
+			blockElement, err := blockRange.Element(uint64(i))
 			if err != nil {
-				return 0, fmt.Errorf("failed to read RLP block element for non-ancient block %d - %x: %w", numberHash.Number, numberHash.Hash, err)
+				return 0, err
 			}
-
-			if prevBlockElement != nil {
-				if err := blockElement.Follows(prevBlockElement); err != nil {
-					return 0, err
-				}
+			if err = migrateNonAncientBlock(newDB, blockElement); err != nil {
+				return 0, err
 			}
-
-			if err := migrateNonAncientBlock(newDB, blockElement); err != nil {
-				return 0, fmt.Errorf("failed to migrate non-ancient block %d - %x: %w", numberHash.Number, numberHash.Hash, err)
-			}
-
 			prevBlockElement = blockElement
 		}
 	}
 
 	migratedCount := lastBlock - numAncients + 1
 	return migratedCount, nil
+}
+
+func loadNonAncientRange(newDB ethdb.Database, start, count uint64) (*RLPBlockRange, error) {
+	blockRange := &RLPBlockRange{
+		start:    start,
+		hashes:   make([][]byte, count),
+		headers:  make([][]byte, count),
+		bodies:   make([][]byte, count),
+		receipts: make([][]byte, count),
+		tds:      make([][]byte, count),
+	}
+
+	numbersHash := rawdb.ReadAllHashesInRange(newDB, start, start+count-1) // minus 1 because start is included in count
+
+	for i, numberHash := range numbersHash {
+		blockElement, err := readRLPBlockElement(newDB, numberHash.Number, numberHash.Hash)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read RLP block element for non-ancient block %d - %x: %w", numberHash.Number, numberHash.Hash, err)
+		}
+
+		blockRange.hashes[i] = blockElement.hash
+		blockRange.headers[i] = blockElement.header
+		blockRange.bodies[i] = blockElement.body
+		blockRange.receipts[i] = blockElement.receipts
+		blockRange.tds[i] = blockElement.td
+	}
+
+	return blockRange, nil
 }
 
 func migrateNonAncientBlock(newDB ethdb.Database, block *RLPBlockElement) error {

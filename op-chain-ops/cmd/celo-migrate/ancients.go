@@ -121,19 +121,8 @@ func readAncientBlocks(ctx context.Context, freezer *rawdb.Freezer, startBlock, 
 				return fmt.Errorf("failed to load ancient block range: %w", err)
 			}
 
-			// Check continuity between blocks
-			var prevElement *RLPBlockElement
-			for i := uint64(0); i < count; i++ {
-				currElement, err := blockRange.Element(i)
-				if err != nil {
-					return err
-				}
-				if prevElement != nil {
-					if err := currElement.Follows(prevElement); err != nil {
-						return err
-					}
-				}
-				prevElement = currElement
+			if err = blockRange.CheckContinuity(nil); err != nil {
+				return err
 			}
 
 			if start > 0 {
@@ -177,6 +166,7 @@ func loadAncientRange(freezer *rawdb.Freezer, start, count uint64) (*RLPBlockRan
 		return nil, fmt.Errorf("failed to read tds from old freezer: %w", err)
 	}
 
+	// TODO(Alec): Should this be moved to CheckContinuity?
 	// Make sure the number of elements retrieved from each table matches the expected length
 	if uint64(len(blockRange.hashes)) != count {
 		err = fmt.Errorf("Expected count mismatch in block range hashes: expected %d, actual %d", count, len(blockRange.hashes))
