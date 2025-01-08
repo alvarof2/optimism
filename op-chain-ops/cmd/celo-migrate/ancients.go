@@ -75,7 +75,7 @@ func migrateAncientsDb(ctx context.Context, oldDBPath, newDBPath string, batchSi
 	g.Go(func() error {
 		return readAncientBlocks(ctx, oldFreezer, numAncientsNewBefore, numAncientsOld, batchSize, readChan)
 	})
-	g.Go(func() error { return transformBlocks(ctx, readChan, transformChan, numAncientsNewBefore) })
+	g.Go(func() error { return transformBlocks(ctx, readChan, transformChan) })
 	g.Go(func() error { return writeAncientBlocks(ctx, newFreezer, transformChan, numAncientsOld) })
 
 	if err = g.Wait(); err != nil {
@@ -178,7 +178,7 @@ func loadLastAncient(freezer *rawdb.Freezer, numAncients uint64) (*RLPBlockEleme
 	return blockRange.Element(0)
 }
 
-func transformBlocks(ctx context.Context, in <-chan RLPBlockRange, out chan<- RLPBlockRange, startBlock uint64) error {
+func transformBlocks(ctx context.Context, in <-chan RLPBlockRange, out chan<- RLPBlockRange) error {
 	// Transform blocks from the in channel and send them to the out channel
 	defer close(out)
 
@@ -187,24 +187,8 @@ func transformBlocks(ctx context.Context, in <-chan RLPBlockRange, out chan<- RL
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
-			for i := range blockRange.hashes {
-				blockNumber := blockRange.start + uint64(i)
-
-				newHeader, err := transformHeader(blockRange.headers[i])
-				if err != nil {
-					return fmt.Errorf("can't transform header: %w", err)
-				}
-				newBody, err := transformBlockBody(blockRange.bodies[i])
-				if err != nil {
-					return fmt.Errorf("can't transform body: %w", err)
-				}
-
-				if err := checkTransformedHeader(newHeader, blockRange.hashes[i], blockNumber); err != nil {
-					return err
-				}
-
-				blockRange.headers[i] = newHeader
-				blockRange.bodies[i] = newBody
+			if err := blockRange.Transform(); err != nil {
+				return err
 			}
 			out <- blockRange
 		}

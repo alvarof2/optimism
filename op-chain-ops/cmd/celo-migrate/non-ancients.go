@@ -73,47 +73,40 @@ func migrateNonAncientsDb(newDB ethdb.Database, lastBlock, numAncients, batchSiz
 	if numAncients > 0 {
 		// The genesis block is the only block that should remain stored in the non-ancient db even after it is frozen.
 		log.Info("Migrating genesis block in non-ancient db", "process", "non-ancients")
-		genesisBlockRange, err := loadNonAncientRange(newDB, 0, 1)
-		if err != nil {
-			return 0, err
-		}
-		genesisBlockElement, err := genesisBlockRange.Element(0)
-		if err != nil {
-			return 0, err
-		}
-		if err := migrateNonAncientBlock(newDB, genesisBlockElement); err != nil {
+		if err := migrateNonAncientBlocks(newDB, 0, 1, nil); err != nil {
 			return 0, err
 		}
 	}
 
-	prevBlockElement := lastAncient
+	prevBlockElement := *lastAncient
 	for i := numAncients; i <= lastBlock; i += batchSize {
-		blockRange, err := loadNonAncientRange(newDB, i, batchSize)
-		if err != nil {
+		if err := migrateNonAncientBlocks(newDB, i, batchSize, &prevBlockElement); err != nil {
 			return 0, err
-		}
-
-		log.Info("Processing Block Range", "process", "non-ancients", "from", i, "to(inclusve)", i+batchSize-1, "count", len(blockRange.hashes))
-
-		if err := blockRange.CheckContinuity(prevBlockElement); err != nil {
-			return 0, fmt.Errorf("failed continuity check for non-ancient blocks: %w", err)
-		}
-
-		for i := range blockRange.hashes {
-			// TODO(Alec) make this cleaner?
-			blockElement, err := blockRange.Element(uint64(i))
-			if err != nil {
-				return 0, err
-			}
-			if err = migrateNonAncientBlock(newDB, blockElement); err != nil {
-				return 0, err
-			}
-			prevBlockElement = blockElement
 		}
 	}
 
 	migratedCount := lastBlock - numAncients + 1
 	return migratedCount, nil
+}
+
+func migrateNonAncientBlocks(newDB ethdb.Database, start, count uint64, prevBlockElement *RLPBlockElement) error {
+	log.Info("Processing Block Range", "process", "non-ancients", "from", start, "to(inclusve)", start+count-1, "count", count)
+
+	blockRange, err := loadNonAncientRange(newDB, start, count)
+	if err != nil {
+		return err
+	}
+	if err = blockRange.CheckContinuity(prevBlockElement); err != nil {
+		return fmt.Errorf("failed continuity check for non-ancient blocks: %w", err)
+	}
+	if err = blockRange.Transform(); err != nil {
+		return err
+	}
+	if err = writeNonAncientBlockRange(newDB, blockRange); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func loadNonAncientRange(newDB ethdb.Database, start, count uint64) (*RLPBlockRange, error) {
@@ -176,31 +169,26 @@ func loadNonAncientRange(newDB ethdb.Database, start, count uint64) (*RLPBlockRa
 	return blockRange, nil
 }
 
-func migrateNonAncientBlock(newDB ethdb.Database, block *RLPBlockElement) error {
-	// transform header and body
-	newHeader, err := transformHeader(block.header)
-	if err != nil {
-		return fmt.Errorf("failed to transform header: block %d - %x: %w", block.number, block.hash, err)
-	}
-	newBody, err := transformBlockBody(block.body)
-	if err != nil {
-		return fmt.Errorf("failed to transform body: block %d - %x: %w", block.number, block.hash, err)
-	}
-
-	if err := checkTransformedHeader(newHeader, block.hash[:], block.number); err != nil {
-		return err
-	}
-
-	// write header and body
-	hash := common.BytesToHash(block.hash)
+// write transformed header and body to newDB
+func writeNonAncientBlock(newDB ethdb.Database, header, body, hashBytes []byte, number uint64) error {
+	hash := common.BytesToHash(hashBytes)
 	batch := newDB.NewBatch()
-	rawdb.WriteBodyRLP(batch, hash, block.number, newBody)
-	if err := batch.Put(headerKey(block.number, hash), newHeader); err != nil {
-		return fmt.Errorf("failed to write header: block %d - %x: %w", block.number, block.hash, err)
+	rawdb.WriteBodyRLP(batch, hash, number, body)
+	if err := batch.Put(headerKey(number, hash), header); err != nil {
+		return fmt.Errorf("failed to write header: block %d - %x: %w", number, hash, err)
 	}
 	if err := batch.Write(); err != nil {
-		return fmt.Errorf("failed to write header and body: block %d - %x: %w", block.number, block.hash, err)
+		return fmt.Errorf("failed to write header and body: block %d - %x: %w", number, hash, err)
 	}
 
+	return nil
+}
+
+func writeNonAncientBlockRange(newDB ethdb.Database, blockRange *RLPBlockRange) error {
+	for i := range blockRange.hashes {
+		if err := writeNonAncientBlock(newDB, blockRange.headers[i], blockRange.bodies[i], blockRange.hashes[i], blockRange.start+uint64(i)); err != nil {
+			return err
+		}
+	}
 	return nil
 }

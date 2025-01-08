@@ -59,6 +59,8 @@ func (r *RLPBlockRange) DropFirst() {
 // CheckContinuity checks if the block data in the range is continuous
 // by comparing the header number and parent hash of each block with the previous block,
 // and by checking if the number of elements retrieved from each table is the same.
+// It takes in a pointer to the last element in the preceding range, and re-assigns it to
+// the last element in the current range so that continuity can be checked across ranges.
 func (r *RLPBlockRange) CheckContinuity(prevElement *RLPBlockElement) error {
 	if err := r.CheckLengths(); err != nil {
 		return err
@@ -99,6 +101,23 @@ func (r *RLPBlockRange) CheckLengths() error {
 		err = errors.Join(err, fmt.Errorf("Expected count mismatch in block range total difficulties: expected %d, actual %d", count, len(r.tds)))
 	}
 	return err
+}
+
+// Transform transforms the necessary block data in the range
+func (r *RLPBlockRange) Transform() error {
+	for i := range r.hashes {
+		blockNumber := r.start + uint64(i)
+
+		newHeader, newBody, err := transform(r.headers[i], r.bodies[i], r.hashes[i], blockNumber)
+		if err != nil {
+			return err
+		}
+
+		r.headers[i] = newHeader
+		r.bodies[i] = newBody
+	}
+
+	return nil
 }
 
 // Follows checks if the current block has a number one greater than the previous block

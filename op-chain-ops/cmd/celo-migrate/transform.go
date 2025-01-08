@@ -125,3 +125,20 @@ func transformBlockBody(oldBodyData []byte) ([]byte, error) {
 
 	return newBodyData, nil
 }
+
+// transform header and body
+func transform(header, body, hash []byte, number uint64) (newHeader []byte, newBody []byte, err error) {
+	newHeader, err = transformHeader(header)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to transform header: block %d - %x: %w", number, hash, err)
+	}
+	if err = checkTransformedHeader(newHeader, hash[:], number); err != nil {
+		return nil, nil, err
+	}
+	newBody, err = transformBlockBody(body)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to transform body: block %d - %x: %w", number, hash, err)
+	}
+
+	return newHeader, newBody, nil
+}
