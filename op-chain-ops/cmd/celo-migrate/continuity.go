@@ -61,8 +61,8 @@ func (r *RLPBlockRange) DropFirst() {
 // and by checking if the number of elements retrieved from each table is the same.
 // It takes in a pointer to the last element in the preceding range, and re-assigns it to
 // the last element in the current range so that continuity can be checked across ranges.
-func (r *RLPBlockRange) CheckContinuity(prevElement *RLPBlockElement) error {
-	if err := r.CheckLengths(); err != nil {
+func (r *RLPBlockRange) CheckContinuity(prevElement *RLPBlockElement, expectedLength uint64) error {
+	if err := r.CheckLengths(expectedLength); err != nil {
 		return err
 	}
 	for i := range r.hashes {
@@ -81,24 +81,22 @@ func (r *RLPBlockRange) CheckContinuity(prevElement *RLPBlockElement) error {
 }
 
 // CheckLengths makes sure the number of elements retrieved from each table is the same
-func (r *RLPBlockRange) CheckLengths() error {
+func (r *RLPBlockRange) CheckLengths(expectedLength uint64) error {
 	var err error
-	count := len(r.hashes)
-	// TODO(Alec) should this take in an expected length parameter?
-	// if len(r.hashes) != count {
-	// 	err = fmt.Errorf("Expected count mismatch in block range hashes: expected %d, actual %d", count, len(r.hashes))
-	// }
-	if len(r.bodies) != count {
-		err = errors.Join(err, fmt.Errorf("Expected count mismatch in block range bodies: expected %d, actual %d", count, len(r.bodies)))
+	if uint64(len(r.hashes)) != expectedLength {
+		err = fmt.Errorf("Expected count mismatch in block range hashes: expected %d, actual %d", expectedLength, len(r.hashes))
 	}
-	if len(r.headers) != count {
-		err = errors.Join(err, fmt.Errorf("Expected count mismatch in block range headers: expected %d, actual %d", count, len(r.headers)))
+	if uint64(len(r.bodies)) != expectedLength {
+		err = errors.Join(err, fmt.Errorf("Expected count mismatch in block range bodies: expected %d, actual %d", expectedLength, len(r.bodies)))
 	}
-	if len(r.receipts) != count {
-		err = errors.Join(err, fmt.Errorf("Expected count mismatch in block range receipts: expected %d, actual %d", count, len(r.receipts)))
+	if uint64(len(r.headers)) != expectedLength {
+		err = errors.Join(err, fmt.Errorf("Expected count mismatch in block range headers: expected %d, actual %d", expectedLength, len(r.headers)))
 	}
-	if len(r.tds) != count {
-		err = errors.Join(err, fmt.Errorf("Expected count mismatch in block range total difficulties: expected %d, actual %d", count, len(r.tds)))
+	if uint64(len(r.receipts)) != expectedLength {
+		err = errors.Join(err, fmt.Errorf("Expected count mismatch in block range receipts: expected %d, actual %d", expectedLength, len(r.receipts)))
+	}
+	if uint64(len(r.tds)) != expectedLength {
+		err = errors.Join(err, fmt.Errorf("Expected count mismatch in block range total difficulties: expected %d, actual %d", expectedLength, len(r.tds)))
 	}
 	return err
 }

@@ -117,7 +117,7 @@ func readAncientBlocks(ctx context.Context, freezer *rawdb.Freezer, startBlock, 
 				return fmt.Errorf("failed to load ancient block range: %w", err)
 			}
 
-			if err = blockRange.CheckContinuity(nil); err != nil {
+			if err = blockRange.CheckContinuity(nil, count); err != nil {
 				return err
 			}
 

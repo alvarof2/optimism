@@ -96,7 +96,7 @@ func migrateNonAncientBlocks(newDB ethdb.Database, start, count uint64, prevBloc
 	if err != nil {
 		return err
 	}
-	if err = blockRange.CheckContinuity(prevBlockElement); err != nil {
+	if err = blockRange.CheckContinuity(prevBlockElement, count); err != nil {
 		return fmt.Errorf("failed continuity check for non-ancient blocks: %w", err)
 	}
 	if err = blockRange.Transform(); err != nil {
