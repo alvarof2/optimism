@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -118,55 +119,56 @@ func loadNonAncientRange(newDB ethdb.Database, start, count uint64) (*RLPBlockRa
 		receipts: make([][]byte, count),
 		tds:      make([][]byte, count),
 	}
-
-	numbersHash := rawdb.ReadAllHashesInRange(newDB, start, start+count-1) // minus 1 because start is included in count
-
-	var err error
-
-	for i, numberHash := range numbersHash {
-		// TODO(Alec)
-		// numberRLP, err := newDB.Get(headerNumberKey(hash))
-		// if err != nil {
-		// 	return nil, fmt.Errorf("failed to find number for hash in newDB leveldb block %d - %x: %w", number, hash, err)
-		// }
-		// e.number = binary.BigEndian.Uint64(numberRLP)
-
+	numberHashes := rawdb.ReadAllHashesInRange(newDB, start, start+count-1) // minus 1 because start is included in count
+	err := checkNumberHashes(newDB, numberHashes)
+	if err != nil {
+		return nil, err
+	}
+	for i, numberHash := range numberHashes {
 		number := numberHash.Number
 		hash := numberHash.Hash
 
-		blockRange.hashes[i], err = newDB.Get(headerHashKey(number))
-		if err != nil {
-			return nil, fmt.Errorf("failed to find canonical hash in newDB leveldb: block %d - %x: %w", number, hash, err)
-		}
+		blockRange.hashes[i] = hash[:]
 		blockRange.headers[i], err = newDB.Get(headerKey(number, hash))
 		if err != nil {
-			return nil, fmt.Errorf("failed to read header: block %d - %x: %w", number, hash, err)
+			return nil, fmt.Errorf("failed to find header in newDB for non-ancient block %d - %x: %w", number, hash, err)
 		}
 		blockRange.bodies[i], err = newDB.Get(blockBodyKey(number, hash))
 		if err != nil {
-			return nil, fmt.Errorf("failed to read body: block %d - %x: %w", number, hash, err)
+			return nil, fmt.Errorf("failed to find body in newDB for non-ancient block %d - %x: %w", number, hash, err)
 		}
 		blockRange.receipts[i], err = newDB.Get(blockReceiptsKey(number, hash))
 		if err != nil {
-			return nil, fmt.Errorf("failed to find receipts in newDB leveldb: block %d - %x: %w", number, hash, err)
+			return nil, fmt.Errorf("failed to find receipts in newDB for non-ancient block %d - %x: %w", number, hash, err)
 		}
 		blockRange.tds[i], err = newDB.Get(headerTDKey(number, hash))
 		if err != nil {
-			return nil, fmt.Errorf("failed to find total difficulty in newDB leveldb: block %d - %x: %w", number, hash, err)
+			return nil, fmt.Errorf("failed to find total difficulty in newDB for non-ancient block %d - %x: %w", number, hash, err)
 		}
-
-		// TODO(Alec) preserve these checks?
-		// if !bytes.Equal(hashFromDB, hash[:]) {
-		// 	return fmt.Errorf("canonical hash mismatch in newDB leveldb: block %d - %x: %w", number, hash, err)
-		// }
-
-		// if !bytes.Equal(numberFromDB, encodeBlockNumber(number)) {
-		// 	log.Error("Number for hash mismatch", "block", number, "numberFromDB", numberFromDB, "hash", hash)
-		// 	return fmt.Errorf("number for hash mismatch in newDB leveldb: block %d - %x: %w", number, hash, err)
-		// }
 	}
-
 	return blockRange, nil
+}
+
+// checkNumberHashes checks that the contents of a NumberHash slice match the contents in the headerNumber and headerHash db tables.
+// We do this to account for any differences in the way NumberHashes are read from the db, and to ensure the slice only contains canonical data.
+func checkNumberHashes(newDB ethdb.Database, numberHashes []*rawdb.NumberHash) error {
+	for _, numberHash := range numberHashes {
+		numberRLP, err := newDB.Get(headerNumberKey(numberHash.Hash))
+		if err != nil {
+			return fmt.Errorf("failed to find number for hash in newDB for non-ancient block %d - %x: %w", numberHash.Number, numberHash.Hash, err)
+		}
+		hashRLP, err := newDB.Get(headerHashKey(numberHash.Number))
+		if err != nil {
+			return fmt.Errorf("failed to find canonical hash in newDB for non-ancient block %d - %x: %w", numberHash.Number, numberHash.Hash, err)
+		}
+		if !bytes.Equal(hashRLP, numberHash.Hash[:]) {
+			return fmt.Errorf("canonical hash mismatch in newDB for non-ancient block %d - %x: %w", numberHash.Number, numberHash.Hash, err)
+		}
+		if !bytes.Equal(numberRLP, encodeBlockNumber(numberHash.Number)) {
+			return fmt.Errorf("number for hash mismatch in newDB for non-ancient block %d - %x: %w", numberHash.Number, numberHash.Hash, err)
+		}
+	}
+	return nil
 }
 
 // write transformed header and body to newDB
