@@ -87,7 +87,7 @@ func migrateAncientsDb(ctx context.Context, oldDBPath, newDBPath string, batchSi
 		return 0, nil, err
 	}
 
-	numAncientsNewAfter := lastAncient.number + 1
+	numAncientsNewAfter := lastAncient.Header().Number.Uint64() + 1
 	if numAncientsNewAfter != numAncientsOld {
 		return 0, nil, fmt.Errorf("failed to migrate all ancients from old to new db. Expected %d, got %d", numAncientsOld, numAncientsNewAfter)
 	}

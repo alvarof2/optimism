@@ -312,7 +312,7 @@ func runPreMigration(opts preMigrationOptions) ([]*rawdb.NumberHash, *RLPBlockEl
 		return nil, nil, fmt.Errorf("failed to migrate blocks: %w", err)
 	}
 
-	numAncientsNewAfter := lastAncient.number + 1
+	numAncientsNewAfter := lastAncient.Header().Number.Uint64() + 1
 
 	log.Info("Pre-Migration Finished", "oldDBPath", opts.oldDBPath, "newDBPath", opts.newDBPath, "migratedAncients", numAncientsNewAfter-numAncientsNewBefore, "strayAncientBlocks", len(strayAncientBlocks))
 
@@ -333,8 +333,9 @@ func runNonAncientMigration(newDBPath string, strayAncientBlocks []*rawdb.Number
 	// get the last block number
 	hash := rawdb.ReadHeadHeaderHash(newDB)
 	lastBlock := *rawdb.ReadHeaderNumber(newDB, hash)
+	lastAncientNumber := lastAncient.Header().Number.Uint64()
 
-	log.Info("Non-Ancient Block Migration Started", "process", "non-ancients", "newDBPath", newDBPath, "batchSize", batchSize, "startBlock", lastAncient.number+1, "endBlock", lastBlock, "count", lastBlock-lastAncient.number, "lastAncientBlock", lastAncient.number)
+	log.Info("Non-Ancient Block Migration Started", "process", "non-ancients", "newDBPath", newDBPath, "batchSize", batchSize, "startBlock", lastAncientNumber+1, "endBlock", lastBlock, "count", lastBlock-lastAncientNumber, "lastAncientBlock", lastAncientNumber)
 
 	var numNonAncients uint64
 	if numNonAncients, err = migrateNonAncientsDb(newDB, lastBlock, batchSize, lastAncient); err != nil {

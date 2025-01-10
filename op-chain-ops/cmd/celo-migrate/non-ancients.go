@@ -79,14 +79,15 @@ func migrateNonAncientsDb(newDB ethdb.Database, lastBlock, batchSize uint64, las
 		}
 	}
 
+	lastAncientNumber := lastAncient.Header().Number.Uint64()
 	prevBlockElement := *lastAncient
-	for i := lastAncient.number + 1; i <= lastBlock; i += batchSize {
+	for i := lastAncientNumber + 1; i <= lastBlock; i += batchSize {
 		if err := migrateNonAncientBlocks(newDB, i, batchSize, &prevBlockElement); err != nil {
 			return 0, err
 		}
 	}
 
-	migratedCount := lastBlock - lastAncient.number
+	migratedCount := lastBlock - lastAncientNumber
 	return migratedCount, nil
 }
 

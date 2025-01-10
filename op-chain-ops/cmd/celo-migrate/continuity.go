@@ -22,7 +22,6 @@ type RLPBlockRange struct {
 // RLPBlockElement contains all relevant block data in RLP format
 type RLPBlockElement struct {
 	decodedHeader *types.Header
-	number        uint64
 	hash          []byte
 	header        []byte
 	body          []byte
@@ -38,7 +37,6 @@ func (r *RLPBlockRange) Element(i uint64) (*RLPBlockElement, error) {
 	}
 	return &RLPBlockElement{
 		decodedHeader: &header,
-		number:        r.start + i, // TODO(Alec): how to use this?
 		hash:          r.hashes[i],
 		header:        r.headers[i],
 		body:          r.bodies[i],
@@ -69,6 +67,9 @@ func (r *RLPBlockRange) CheckContinuity(prevElement *RLPBlockElement, expectedLe
 		currElement, err := r.Element(uint64(i))
 		if err != nil {
 			return err
+		}
+		if currElement.Header().Number.Uint64() != r.start+uint64(i) {
+			return fmt.Errorf("decoded header number mismatch: expected %d, actual %d", r.start+uint64(i), currElement.Header().Number.Uint64())
 		}
 		if prevElement != nil {
 			if err := currElement.Follows(prevElement); err != nil {
