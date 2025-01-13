@@ -1,0 +1,21 @@
+#tag-template: '${{ env.BRANCH_NAME }}-v$RESOLVED_VERSION'
+name-template: 'CELO OPTIMISM - v$RESOLVED_VERSION 🌈'
+filter-by-commitish: true
+categories:
+  - title: '🚀 Nginx One'
+    label: 'nginx-one'
+  - title: '🐛 Nginx Two'
+    labels: 'nginx-two'
+autolabeler:
+  - label: 'nginx-one'
+    files:
+      - 'nginx-one/**/*'
+  - label: 'nginx-two'
+    files:
+      - 'nginx-two/**/*'
+exclude-labels:
+  - 'skip-release-drafter'
+template: |
+  ## What’s Changed
+
+  $CHANGES
